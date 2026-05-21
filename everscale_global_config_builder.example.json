@@ -1,0 +1,14 @@
+{
+  "seed_global_config_path": "/home/admin/everscale_dht_bootstrap/everscale-bootstrap-global-config.json",
+  "output_global_config_path": "out/everscale-global-config.json",
+  "report_path": "out/everscale-global-config-report.json",
+  "local_adnl_addr": "0.0.0.0:4192",
+  "crawl_rounds": 6,
+  "peer_timeout_secs": 8,
+  "max_known_nodes": 1000,
+  "max_output_nodes": 200,
+  "min_successes": 1,
+  "include_seed_nodes": false,
+  "allow_private_ips": false,
+  "compact": false
+}

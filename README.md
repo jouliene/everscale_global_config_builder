@@ -54,6 +54,8 @@ jq '.dht.static_nodes.nodes | length' out/everscale-global-config.json
 
 Use a local ADNL port that is not already used by the resolver service. The example uses `0.0.0.0:4192` so it does not conflict with a resolver on `4191`.
 
+`workers` controls how many DHT peers are queried in parallel. The default is `32`, which keeps live crawls fast enough for a few hundred discovered peers without waiting on silent nodes one by one.
+
 ## Output Policy
 
 Defaults are conservative:

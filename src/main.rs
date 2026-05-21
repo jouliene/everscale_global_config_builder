@@ -15,6 +15,7 @@ use adnl::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use ever_block::{Ed25519KeyOption, KeyId, KeyOption, UInt256, base64_decode, base64_encode};
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::timeout;
@@ -59,6 +60,8 @@ struct AppConfig {
     crawl_rounds: usize,
     #[serde(default = "default_peer_timeout_secs")]
     peer_timeout_secs: u64,
+    #[serde(default = "default_workers")]
+    workers: usize,
     #[serde(default = "default_max_known_nodes")]
     max_known_nodes: usize,
     #[serde(default = "default_max_output_nodes")]
@@ -164,6 +167,8 @@ struct BuildReport {
 #[derive(Debug, Serialize)]
 struct BuildSummary {
     crawl_rounds: usize,
+    workers: usize,
+    peer_timeout_secs: u64,
     min_successes: u32,
     include_seed_nodes: bool,
     allow_private_ips: bool,
@@ -215,10 +220,12 @@ async fn build(args: BuildArgs) -> Result<()> {
         bail!("seed config has no valid DHT static nodes");
     }
 
+    let workers = config.workers.max(1);
     eprintln!(
-        "build start seed_nodes={} rounds={} local_adnl={}",
+        "build start seed_nodes={} rounds={} workers={} local_adnl={}",
         seed_nodes.len(),
         config.crawl_rounds,
+        workers,
         config.local_adnl_addr
     );
 
@@ -235,14 +242,25 @@ async fn build(args: BuildArgs) -> Result<()> {
         record_candidate(&mut candidates, node.clone(), true, now)?;
     }
     record_known_nodes(&crawler, &mut candidates, now)?;
+    eprintln!(
+        "bootstrap accepted seed_nodes={} initial_known={}",
+        seed_nodes.len(),
+        candidates.len()
+    );
 
     for round in 1..=config.crawl_rounds {
         let keys = candidate_keys(&candidates);
-        let mut queried = 0usize;
+        eprintln!(
+            "round {round} start peers={} workers={} timeout={}s",
+            keys.len(),
+            workers,
+            config.peer_timeout_secs
+        );
+        let results = expand_candidates(&crawler, keys, workers, round).await;
+        let queried = results.len();
         let mut ok = 0usize;
-        for key in keys {
-            queried += 1;
-            match crawler.expand_peer(&key).await {
+        for (key, result) in results {
+            match result {
                 Ok(true) => {
                     ok += 1;
                     if let Some(candidate) = find_candidate_by_key_mut(&mut candidates, &key) {
@@ -262,14 +280,21 @@ async fn build(args: BuildArgs) -> Result<()> {
                 }
             }
         }
+        let known_before = candidates.len();
         record_known_nodes(&crawler, &mut candidates, now)?;
+        let discovered = candidates.len().saturating_sub(known_before);
         eprintln!(
-            "round {round} queried={queried} responsive={ok} known={}",
+            "round {round} done queried={queried} responsive={ok} discovered_new={discovered} known={}",
             candidates.len()
         );
     }
 
-    validate_candidates(&crawler, &mut candidates).await;
+    let ping_ok = validate_candidates(&crawler, &mut candidates, workers).await;
+    eprintln!(
+        "validation done ping_responsive={} candidates={}",
+        ping_ok,
+        candidates.len()
+    );
 
     let mut report_nodes = Vec::new();
     let mut output_nodes = Vec::new();
@@ -323,6 +348,8 @@ async fn build(args: BuildArgs) -> Result<()> {
         excluded_nodes: candidates.len().saturating_sub(output_nodes.len()),
         summary: BuildSummary {
             crawl_rounds: config.crawl_rounds,
+            workers,
+            peer_timeout_secs: config.peer_timeout_secs,
             min_successes: config.min_successes,
             include_seed_nodes: config.include_seed_nodes,
             allow_private_ips: config.allow_private_ips,
@@ -574,10 +601,79 @@ fn record_candidate(
     Ok(())
 }
 
-async fn validate_candidates(crawler: &Crawler, candidates: &mut BTreeMap<String, Candidate>) {
+async fn expand_candidates(
+    crawler: &Crawler,
+    keys: Vec<Arc<KeyId>>,
+    workers: usize,
+    round: usize,
+) -> Vec<(Arc<KeyId>, Result<bool>)> {
+    let total = keys.len();
+    let mut done = 0usize;
+    let mut ok = 0usize;
+    let mut no_data = 0usize;
+    let mut errors = 0usize;
+    let mut results = Vec::with_capacity(total);
+    let mut pending = stream::iter(keys)
+        .map(|key| async move {
+            let result = crawler.expand_peer(&key).await;
+            (key, result)
+        })
+        .buffer_unordered(workers.max(1));
+
+    while let Some((key, result)) = pending.next().await {
+        done += 1;
+        match &result {
+            Ok(true) => ok += 1,
+            Ok(false) => no_data += 1,
+            Err(_) => errors += 1,
+        }
+        if done == total || done % 25 == 0 {
+            eprintln!(
+                "round {round} progress {done}/{total} responsive={ok} no_data={no_data} errors={errors}"
+            );
+        }
+        results.push((key, result));
+    }
+
+    results
+}
+
+async fn validate_candidates(
+    crawler: &Crawler,
+    candidates: &mut BTreeMap<String, Candidate>,
+    workers: usize,
+) -> usize {
     let keys = candidate_keys(candidates);
-    for key in keys {
-        let result = crawler.ping(&key).await;
+    let total = keys.len();
+    let mut done = 0usize;
+    let mut ok = 0usize;
+    let mut no_response = 0usize;
+    let mut errors = 0usize;
+    let mut results = Vec::with_capacity(total);
+    eprintln!("validation start peers={total} workers={}", workers.max(1));
+    let mut pending = stream::iter(keys)
+        .map(|key| async move {
+            let result = crawler.ping(&key).await;
+            (key, result)
+        })
+        .buffer_unordered(workers.max(1));
+
+    while let Some((key, result)) = pending.next().await {
+        done += 1;
+        match &result {
+            Ok(true) => ok += 1,
+            Ok(false) => no_response += 1,
+            Err(_) => errors += 1,
+        }
+        if done == total || done % 25 == 0 {
+            eprintln!(
+                "validation progress {done}/{total} ping_ok={ok} no_response={no_response} errors={errors}"
+            );
+        }
+        results.push((key, result));
+    }
+
+    for (key, result) in results {
         if let Some(candidate) = find_candidate_by_key_mut(candidates, &key) {
             match result {
                 Ok(true) => {
@@ -593,6 +689,8 @@ async fn validate_candidates(crawler: &Crawler, candidates: &mut BTreeMap<String
             }
         }
     }
+
+    ok
 }
 
 fn candidate_keys(candidates: &BTreeMap<String, Candidate>) -> Vec<Arc<KeyId>> {
@@ -824,6 +922,10 @@ fn default_crawl_rounds() -> usize {
 
 fn default_peer_timeout_secs() -> u64 {
     8
+}
+
+fn default_workers() -> usize {
+    32
 }
 
 fn default_max_known_nodes() -> usize {

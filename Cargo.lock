@@ -557,6 +557,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ever_block",
+ "futures",
  "serde",
  "serde_json",
  "tokio",

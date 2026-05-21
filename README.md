@@ -63,6 +63,7 @@ By default, `recursive_crawl` is `false`. The builder queries only the configure
 Defaults are conservative:
 
 - `include_seed_nodes: false` means seed nodes are not forced into the output unless they are observed as reachable during this run.
+- `max_seed_nodes_in_output: 3` keeps the generated public config from depending too heavily on the seed operator while still allowing a few stable seed nodes.
 - `allow_private_ips: false` excludes private, loopback, multicast, link-local, documentation, and unspecified IPv4 addresses.
 - `min_successes: 1` requires at least one successful live query or ping before a node is emitted.
 

@@ -10,6 +10,7 @@
   "max_known_nodes": 1000,
   "max_round_peers": 250,
   "max_output_nodes": 100,
+  "max_seed_nodes_in_output": 3,
   "min_successes": 1,
   "include_seed_nodes": false,
   "allow_private_ips": false,

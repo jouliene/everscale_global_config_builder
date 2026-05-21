@@ -70,6 +70,8 @@ struct AppConfig {
     max_round_peers: usize,
     #[serde(default = "default_max_output_nodes")]
     max_output_nodes: usize,
+    #[serde(default = "default_max_seed_nodes_in_output")]
+    max_seed_nodes_in_output: usize,
     #[serde(default = "default_min_successes")]
     min_successes: u32,
     #[serde(default)]
@@ -176,6 +178,7 @@ struct BuildSummary {
     peer_timeout_secs: u64,
     max_round_peers: usize,
     min_successes: u32,
+    max_seed_nodes_in_output: usize,
     include_seed_nodes: bool,
     allow_private_ips: bool,
     max_output_nodes: usize,
@@ -341,7 +344,25 @@ async fn build(args: BuildArgs) -> Result<()> {
             .then_with(|| b.seen_count.cmp(&a.seen_count))
             .then_with(|| a.public_key.cmp(&b.public_key))
     });
-    output_nodes.truncate(config.max_output_nodes);
+    let mut selected_output_nodes = Vec::new();
+    let mut seed_nodes_selected = 0usize;
+    let mut seed_limit_keys = BTreeSet::new();
+    let mut output_limit_keys = BTreeSet::new();
+    for candidate in output_nodes {
+        if candidate.seed && seed_nodes_selected >= config.max_seed_nodes_in_output {
+            seed_limit_keys.insert(candidate.public_key.clone());
+            continue;
+        }
+        if selected_output_nodes.len() >= config.max_output_nodes {
+            output_limit_keys.insert(candidate.public_key.clone());
+            continue;
+        }
+        if candidate.seed {
+            seed_nodes_selected += 1;
+        }
+        selected_output_nodes.push(candidate);
+    }
+    let output_nodes = selected_output_nodes;
 
     let output_values = output_nodes
         .iter()
@@ -361,7 +382,14 @@ async fn build(args: BuildArgs) -> Result<()> {
         .collect();
     for node in &mut report_nodes {
         node.included = included_keys.contains(node.public_key.as_str());
-        if !node.included && node.reason == "included" {
+        if seed_limit_keys.contains(node.public_key.as_str()) {
+            node.reason = format!(
+                "excluded by max_seed_nodes_in_output limit {}",
+                config.max_seed_nodes_in_output
+            );
+        } else if output_limit_keys.contains(node.public_key.as_str())
+            || (!node.included && node.reason == "included")
+        {
             node.reason = "excluded by max_output_nodes limit".to_owned();
         }
     }
@@ -383,6 +411,7 @@ async fn build(args: BuildArgs) -> Result<()> {
             peer_timeout_secs: config.peer_timeout_secs,
             max_round_peers: config.max_round_peers,
             min_successes: config.min_successes,
+            max_seed_nodes_in_output: config.max_seed_nodes_in_output,
             include_seed_nodes: config.include_seed_nodes,
             allow_private_ips: config.allow_private_ips,
             max_output_nodes: config.max_output_nodes,
@@ -970,6 +999,10 @@ fn default_max_round_peers() -> usize {
 
 fn default_max_output_nodes() -> usize {
     100
+}
+
+fn default_max_seed_nodes_in_output() -> usize {
+    3
 }
 
 fn default_min_successes() -> u32 {

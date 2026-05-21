@@ -58,12 +58,16 @@ struct AppConfig {
     local_adnl_addr: String,
     #[serde(default = "default_crawl_rounds")]
     crawl_rounds: usize,
+    #[serde(default)]
+    recursive_crawl: bool,
     #[serde(default = "default_peer_timeout_secs")]
     peer_timeout_secs: u64,
     #[serde(default = "default_workers")]
     workers: usize,
     #[serde(default = "default_max_known_nodes")]
     max_known_nodes: usize,
+    #[serde(default = "default_max_round_peers")]
+    max_round_peers: usize,
     #[serde(default = "default_max_output_nodes")]
     max_output_nodes: usize,
     #[serde(default = "default_min_successes")]
@@ -167,8 +171,10 @@ struct BuildReport {
 #[derive(Debug, Serialize)]
 struct BuildSummary {
     crawl_rounds: usize,
+    recursive_crawl: bool,
     workers: usize,
     peer_timeout_secs: u64,
+    max_round_peers: usize,
     min_successes: u32,
     include_seed_nodes: bool,
     allow_private_ips: bool,
@@ -222,9 +228,10 @@ async fn build(args: BuildArgs) -> Result<()> {
 
     let workers = config.workers.max(1);
     eprintln!(
-        "build start seed_nodes={} rounds={} workers={} local_adnl={}",
+        "build start seed_nodes={} rounds={} recursive_crawl={} workers={} local_adnl={}",
         seed_nodes.len(),
         config.crawl_rounds,
+        config.recursive_crawl,
         workers,
         config.local_adnl_addr
     );
@@ -237,6 +244,10 @@ async fn build(args: BuildArgs) -> Result<()> {
     )
     .await?;
 
+    let seed_keys = seed_nodes
+        .iter()
+        .map(node_key_id)
+        .collect::<Result<Vec<_>>>()?;
     let mut candidates = BTreeMap::new();
     for node in &seed_nodes {
         record_candidate(&mut candidates, node.clone(), true, now)?;
@@ -248,13 +259,32 @@ async fn build(args: BuildArgs) -> Result<()> {
         candidates.len()
     );
 
-    for round in 1..=config.crawl_rounds {
-        let keys = candidate_keys(&candidates);
+    let rounds = if config.recursive_crawl {
+        config.crawl_rounds.max(1)
+    } else {
+        1
+    };
+    for round in 1..=rounds {
+        let mut keys = if config.recursive_crawl && round > 1 {
+            candidate_keys(&candidates)
+        } else {
+            seed_keys.clone()
+        };
+        let peers_before_limit = keys.len();
+        if config.recursive_crawl && keys.len() > config.max_round_peers {
+            keys.truncate(config.max_round_peers);
+        }
         eprintln!(
-            "round {round} start peers={} workers={} timeout={}s",
+            "round {round} start peers={} peers_before_limit={} workers={} timeout={}s mode={}",
             keys.len(),
+            peers_before_limit,
             workers,
-            config.peer_timeout_secs
+            config.peer_timeout_secs,
+            if config.recursive_crawl {
+                "recursive"
+            } else {
+                "seed-only"
+            }
         );
         let results = expand_candidates(&crawler, keys, workers, round).await;
         let queried = results.len();
@@ -347,9 +377,11 @@ async fn build(args: BuildArgs) -> Result<()> {
         included_nodes: output_nodes.len(),
         excluded_nodes: candidates.len().saturating_sub(output_nodes.len()),
         summary: BuildSummary {
-            crawl_rounds: config.crawl_rounds,
+            crawl_rounds: rounds,
+            recursive_crawl: config.recursive_crawl,
             workers,
             peer_timeout_secs: config.peer_timeout_secs,
+            max_round_peers: config.max_round_peers,
             min_successes: config.min_successes,
             include_seed_nodes: config.include_seed_nodes,
             allow_private_ips: config.allow_private_ips,
@@ -917,7 +949,7 @@ fn default_local_adnl_addr() -> String {
 }
 
 fn default_crawl_rounds() -> usize {
-    6
+    1
 }
 
 fn default_peer_timeout_secs() -> u64 {
@@ -932,8 +964,12 @@ fn default_max_known_nodes() -> usize {
     1000
 }
 
+fn default_max_round_peers() -> usize {
+    250
+}
+
 fn default_max_output_nodes() -> usize {
-    200
+    100
 }
 
 fn default_min_successes() -> u32 {

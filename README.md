@@ -9,7 +9,7 @@ This project does not turn validator IP addresses into global-config entries. A 
 The old public Everscale global config can become stale. A private seed config can work, but publishing a config made only from one operator's nodes is not ideal. This builder makes the process repeatable:
 
 - start from a small seed config;
-- discover signed DHT nodes from the live Everscale DHT;
+- discover signed DHT nodes directly from the configured Everscale seed peers;
 - verify signatures through `ever-adnl`;
 - keep only reachable public IPv4 peers by default;
 - preserve all non-DHT fields from the seed config;
@@ -55,6 +55,8 @@ jq '.dht.static_nodes.nodes | length' out/everscale-global-config.json
 Use a local ADNL port that is not already used by the resolver service. The example uses `0.0.0.0:4192` so it does not conflict with a resolver on `4191`.
 
 `workers` controls how many DHT peers are queried in parallel. The default is `32`, which keeps live crawls fast enough for a few hundred discovered peers without waiting on silent nodes one by one.
+
+By default, `recursive_crawl` is `false`. The builder queries only the configured seed peers and then validates the signed peers discovered from them. This avoids walking an unbounded DHT graph that may contain stale, service, non-validator, or cross-era records. Enable `recursive_crawl` only for research runs.
 
 ## Output Policy
 
